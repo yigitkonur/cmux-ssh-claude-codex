@@ -32,7 +32,7 @@ test: lint
 		echo "bats not found; install with 'brew install bats-core'" >&2; \
 		exit 1; \
 	fi
-	bats tests/
+	bats -r tests/
 
 install:
 	@install -d $(BIN_DIR) $(LIB_DIR) $(SHARE_DIR)

@@ -137,8 +137,8 @@ handle_claude_hook() {
       _bootstrap_render "$CMUX_WORKSPACE_ID"
       local short
       short="$(_short_input "$tool_input")"
-      cc_notify_cross_workspace "🔐 Permission needed" \
-        "📂 ${project} · ${tool_name}: ${short}" --rule "permission_request" || true
+      cc_notify_cross_workspace "Permission needed" \
+        "${project} · ${tool_name}: ${short}" --rule "permission_request" || true
       ;;
 
     Stop)
@@ -149,7 +149,7 @@ handle_claude_hook() {
       _bootstrap_render "$CMUX_WORKSPACE_ID"
       # Optional alert; gated by config.
       if _on_stop_notify_enabled; then
-        cc_notify_cross_workspace "✅ ${project} done" "Claude Code finished a turn." --rule "stop_success" || true
+        cc_notify_cross_workspace "${project} done" "Claude Code finished a turn." --rule "stop_success" || true
       fi
       ;;
 
@@ -160,7 +160,7 @@ handle_claude_hook() {
         --arg stop_reason error --arg error "$err" \
         '{evt:$evt,at:$at,stop_reason:$stop_reason,error:$error}')"
       _bootstrap_render "$CMUX_WORKSPACE_ID"
-      cc_notify_cross_workspace "🔴 Error in ${project}" "$(cc_truncate_str 200 "$err")" --rule "stop_failure" || true
+      cc_notify_cross_workspace "Error in ${project}" "$(cc_truncate_str 200 "$err")" --rule "stop_failure" || true
       ;;
 
     SubagentStart)
@@ -188,6 +188,20 @@ handle_claude_hook() {
       _hook_emit "$session_id" "$(cc_jq -nc --arg evt notify --argjson at "$at" \
         --arg title "$title" --arg body "$body" \
         '{evt:$evt,at:$at,title:$title,body:$body}')"
+      # Permission-prompt notifications stall Claude before the PermissionRequest
+      # hook fires (and on some Claude Code versions PermissionRequest never
+      # fires for in-flight tool prompts). Synthesize a permission_request event
+      # so the tile shows "waiting" instead of stale "done". The producer in
+      # render-loop treats any subsequent pre_tool as the implicit resolution.
+      # Match common phrasings — Claude Code's notification text varies by
+      # version. Keep tight enough to avoid false positives on plain prose.
+      if printf '%s\n%s' "$title" "$body" \
+         | grep -qiE 'permission|approval|approve|needs your |awaiting input|wants to use'; then
+        _hook_emit "$session_id" "$(cc_jq -nc --arg evt permission_request --argjson at "$at" \
+          --arg tool "$tool_name" --arg source notification \
+          '{evt:$evt,at:$at,tool:$tool,source:$source}')"
+        _bootstrap_render "$CMUX_WORKSPACE_ID"
+      fi
       cc_notify_cross_workspace "$title" "$body" --rule "notification" || true
       ;;
 

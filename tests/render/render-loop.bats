@@ -105,6 +105,107 @@ teardown() { rm -rf "$CC_SSH_HOME" "$BATS_TEST_TMPDIR/stubs"; }
   run compute_session_state "$f" "claude" 1200
   [ "$status" -eq 0 ]
   echo "$output" | jq -r '.phase' | grep -q '^done$'
+  # phase_started_at is the stop's at, not the session's start.
+  echo "$output" | jq -r '.phase_started_at' | grep -q '^1100$'
+  # elapsed_s is now - stop.at, not now - start.at.
+  echo "$output" | jq -r '.elapsed_s' | grep -q '^100$'
+}
+
+@test "permission_request without subsequent pre_tool yields phase=waiting" {
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  printf '%s\n' \
+    '{"evt":"start","at":1000}' \
+    '{"evt":"user_prompt_submit","at":1010}' \
+    '{"evt":"permission_request","at":1500,"tool":"Bash"}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 2000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^waiting$'
+  echo "$output" | jq -r '.phase_started_at' | grep -q '^1500$'
+  echo "$output" | jq -r '.elapsed_s' | grep -q '^500$'
+}
+
+@test "permission_request followed by pre_tool yields phase=working (implicit resolve)" {
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  printf '%s\n' \
+    '{"evt":"start","at":1000}' \
+    '{"evt":"user_prompt_submit","at":1010}' \
+    '{"evt":"permission_request","at":1500,"tool":"Bash"}' \
+    '{"evt":"pre_tool","at":1600,"tool":"Bash","first_arg":"ls"}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 2000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^working$'
+  echo "$output" | jq -r '.phase_started_at' | grep -q '^1600$'
+}
+
+@test "user_prompt_submit after stop transitions out of done" {
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  printf '%s\n' \
+    '{"evt":"start","at":1000}' \
+    '{"evt":"user_prompt_submit","at":1010}' \
+    '{"evt":"pre_tool","at":1020,"tool":"Read"}' \
+    '{"evt":"post_tool","at":1030,"tool":"Read","ok":true}' \
+    '{"evt":"stop","at":1100,"stop_reason":"user_turn_complete"}' \
+    '{"evt":"user_prompt_submit","at":1900}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 2000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^thinking$'
+  echo "$output" | jq -r '.phase_started_at' | grep -q '^1900$'
+  echo "$output" | jq -r '.elapsed_s' | grep -q '^100$'
+}
+
+@test "elapsed_s reflects phase duration, not session duration" {
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  # Session has been alive a long time (since 100); stop happened 10s ago.
+  printf '%s\n' \
+    '{"evt":"start","at":100}' \
+    '{"evt":"stop","at":200,"stop_reason":"user_turn_complete"}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 210
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.elapsed_s' | grep -q '^10$'
+}
+
+@test "post_tool with no following pre_tool yields phase=thinking (in-turn)" {
+  # Regression for the "0s · ready while Claude is reading the result" bug.
+  # Between PostToolUse and the next PreToolUse, Claude is still in-turn —
+  # the tile must say "thinking", not "ready", and the timer must reflect
+  # time-since-post_tool, not time-since-session-start.
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  printf '%s\n' \
+    '{"evt":"start","at":1000}' \
+    '{"evt":"user_prompt_submit","at":1010}' \
+    '{"evt":"pre_tool","at":1020,"tool":"Bash"}' \
+    '{"evt":"post_tool","at":1990,"tool":"Bash","ok":true}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 2000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^thinking$'
+  echo "$output" | jq -r '.phase_started_at' | grep -q '^1990$'
+  echo "$output" | jq -r '.elapsed_s' | grep -q '^10$'
+}
+
+@test "respawn after truncation (only post_tool, no prompt) infers in-turn" {
+  # JSONL truncation can drop user_prompt_submit; a recent pre/post still
+  # signals in-turn so the tile shows thinking, not ready.
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  printf '%s\n' \
+    '{"evt":"post_tool","at":1900,"tool":"Bash"}' \
+    >"$f"
+  run compute_session_state "$f" "claude" 2000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^thinking$'
+}
+
+@test "ready phase only when no in-turn marker exists" {
+  # Empty tail — truly idle workspace, no session activity at all.
+  local f="$BATS_TEST_TMPDIR/sess.jsonl"
+  : >"$f"
+  run compute_session_state "$f" "claude" 1000
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -r '.phase' | grep -q '^ready$'
 }
 
 @test "compute_session_state collects subagent metadata" {

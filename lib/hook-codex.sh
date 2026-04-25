@@ -179,8 +179,8 @@ handle_codex_hook() {
       # Default cross-workspace alert.
       local short
       short="$(cc_truncate_str 60 "$first_arg")"
-      cc_notify_cross_workspace "🔐 Codex permission needed" \
-        "📂 ${project} · ${tool_name}: ${short}" --rule "codex_permission_request" || true
+      cc_notify_cross_workspace "Codex permission needed" \
+        "${project} · ${tool_name}: ${short}" --rule "codex_permission_request" || true
       ensure_renderer "$CMUX_WORKSPACE_ID"
       ;;
 
@@ -207,7 +207,7 @@ handle_codex_hook() {
         --arg stop_reason "$stop_reason" --arg error "$err" \
         '{evt:$evt,at:$at,stop_reason:$stop_reason,error:$error}')"
       if [[ "$stop_reason" == "error" ]]; then
-        cc_notify_cross_workspace "🔴 Codex error in ${project}" \
+        cc_notify_cross_workspace "Codex error in ${project}" \
           "$(cc_truncate_str 200 "$err")" --rule "codex_stop_error" || true
         return 0
       fi

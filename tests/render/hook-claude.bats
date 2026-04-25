@@ -148,6 +148,25 @@ _jsonl() {
   [[ "$output" == *"notification.create"* ]]
 }
 
+@test "Notification with permission keyword emits permission_request event" {
+  export CC_SSH_NOTIFY_DEST="ws-other"
+  echo '{"session_id":"s1","title":"Permission request","message":"Claude needs your permission to use Bash","tool_name":"Bash"}' \
+    | handle_claude_hook Notification
+  run _jsonl "s1"
+  [[ "$output" == *'"evt":"notify"'* ]]
+  [[ "$output" == *'"evt":"permission_request"'* ]]
+  [[ "$output" == *'"source":"notification"'* ]]
+}
+
+@test "Notification without permission keyword emits only notify" {
+  export CC_SSH_NOTIFY_DEST="ws-other"
+  echo '{"session_id":"s2","title":"Hello","body":"plain notification"}' \
+    | handle_claude_hook Notification
+  run _jsonl "s2"
+  [[ "$output" == *'"evt":"notify"'* ]]
+  [[ "$output" != *'"evt":"permission_request"'* ]]
+}
+
 @test "TaskCompleted appends task_completed event (no notify)" {
   export CC_SSH_NOTIFY_DEST="ws-other"
   echo '{"session_id":"s1","task_id":"task-1"}' | handle_claude_hook TaskCompleted

@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for lib/credits-roll.sh — title chips, cycling, phase emoji.
+# Tests for lib/credits-roll.sh — title chips, cycling, phase color palette.
 
 setup() {
   export CC_SSH_HOME="$BATS_TEST_TMPDIR/cc-ssh"
@@ -13,22 +13,36 @@ setup() {
 
 teardown() { rm -rf "$CC_SSH_HOME"; }
 
-@test "phase_emoji maps phases" {
-  [ "$(phase_emoji ready)" = "🟢" ]
-  [ "$(phase_emoji thinking)" = "🧠" ]
-  [ "$(phase_emoji working)" = "🛠" ]
-  [ "$(phase_emoji waiting)" = "✋" ]
-  [ "$(phase_emoji compacting)" = "🌀" ]
-  [ "$(phase_emoji done)" = "✅" ]
-  [ "$(phase_emoji error)" = "🔴" ]
+@test "phase_color: static states use sidebar-toned palette" {
+  [ "$(phase_color ready 0)" = "#323343" ]
+  [ "$(phase_color done 0)" = "#323F43" ]
+  [ "$(phase_color waiting 0)" = "#3C3243" ]
+  [ "$(phase_color error 0)" = "#3C3243" ]
+  # Unknown phase falls through to sidebar base.
+  [ "$(phase_color zzz 0)" = "#323343" ]
 }
 
-@test "phase_color maps phases" {
-  [ "$(phase_color working)" = "#FF9500" ]
-  [ "$(phase_color thinking)" = "#5856D6" ]
-  [ "$(phase_color waiting)" = "#FF3B30" ]
-  [ "$(phase_color done)" = "#34C759" ]
-  [ "$(phase_color error)" = "#FF3B30" ]
+@test "phase_color: working/thinking/compacting cycle through 8 shades" {
+  export PHASE_CYCLE_PERIOD_MS=1000
+  # 8 distinct colors over 8 ticks, then wraps.
+  [ "$(phase_color working 0)" = "#2d2e3d" ]
+  [ "$(phase_color working 1000)" = "#323343" ]
+  [ "$(phase_color working 2000)" = "#37384a" ]
+  [ "$(phase_color working 3000)" = "#3d3e51" ]
+  [ "$(phase_color working 4000)" = "#34344a" ]
+  [ "$(phase_color working 5000)" = "#272840" ]
+  [ "$(phase_color working 6000)" = "#1c1d37" ]
+  [ "$(phase_color working 7000)" = "#0e0f2b" ]
+  [ "$(phase_color working 8000)" = "#2d2e3d" ]
+  # thinking and compacting share the same cycle as working.
+  [ "$(phase_color thinking 2000)" = "$(phase_color working 2000)" ]
+  [ "$(phase_color compacting 5000)" = "$(phase_color working 5000)" ]
+}
+
+@test "phase_color: static phases ignore tick_ms" {
+  [ "$(phase_color ready 999)" = "$(phase_color ready 0)" ]
+  [ "$(phase_color done 12345)" = "$(phase_color done 0)" ]
+  [ "$(phase_color waiting 7777)" = "$(phase_color waiting 0)" ]
 }
 
 @test "phase_max picks higher priority" {
@@ -44,9 +58,10 @@ teardown() { rm -rf "$CC_SSH_HOME"; }
   [ "$status" -eq 0 ]
   title=$(echo "$output" | jq -r '.title')
   color=$(echo "$output" | jq -r '.color')
-  [ "$title" = "📂 myrepo · 3 ops" ]
-  [ "$color" = "#FF9500" ]
-  echo "$output" | jq -r '.desc' | head -n 1 | grep -q '▶ Read foo.ts'
+  [ "$title" = "myrepo · 3 ops" ]
+  # working phase with tick_ms=0 lands on the first color of the cycle.
+  [ "$color" = "#2d2e3d" ]
+  echo "$output" | jq -r '.desc' | head -n 1 | grep -q '^Read foo.ts$'
 }
 
 @test "format_credits_roll adds session/subagent chips" {
@@ -55,8 +70,8 @@ teardown() { rm -rf "$CC_SSH_HOME"; }
   run format_credits_roll "$state" 0
   [ "$status" -eq 0 ]
   title=$(echo "$output" | jq -r '.title')
-  [[ "$title" == *"2🪟"* ]]
-  [[ "$title" == *"3🤖"* ]]
+  [[ "$title" == *"2 sessions"* ]]
+  [[ "$title" == *"3 agents"* ]]
   [[ "$title" == *"git:feat/x*"* ]]
 }
 
@@ -117,19 +132,21 @@ teardown() { rm -rf "$CC_SSH_HOME"; }
   [[ "$output" == "· 2m14s Bash ls" ]]
 }
 
-@test "format_credits_roll done phase yields green color" {
+@test "format_credits_roll done phase yields completed (sidebar-toned teal) color" {
   local state
   state='{"project":"x","ops":1,"phase":"done","cycling_lanes":[],"session_count":1,"subagent_count":0}'
   run format_credits_roll "$state" 0
-  echo "$output" | grep -q '#34C759'
+  echo "$output" | grep -q '#323F43'
 }
 
-@test "format_credits_roll error phase yields red and 🔴" {
+@test "format_credits_roll error phase yields warning color and text-only label" {
   local state
   state='{"project":"x","ops":1,"phase":"error","cycling_lanes":[],"session_count":1,"subagent_count":0}'
   run format_credits_roll "$state" 0
-  echo "$output" | grep -q '#FF3B30'
-  echo "$output" | grep -q '🔴'
+  echo "$output" | grep -q '#3C3243'
+  echo "$output" | jq -r '.desc' | grep -q ' · error$'
+  # Footer must be emoji-free.
+  ! echo "$output" | jq -r '.desc' | grep -q -e '🔴' -e '⏱' -e '🟢'
 }
 
 @test "format_credits_roll surfaces auto-continue suffix in desc-5" {

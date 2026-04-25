@@ -44,7 +44,7 @@ cc_doctor() {
     v="$(jq --version 2>/dev/null)"
     _doc_pass "jq installed ($v)"
   elif cc_have python3; then
-    _doc_warn "jq missing — using python3 fallback (slower)"
+    _doc_warn "jq missing — using python3 fallback (slower; install --claude requires jq)"
   else
     _doc_fail "neither jq nor python3 available"
   fi
@@ -59,14 +59,13 @@ cc_doctor() {
   # 5. Claude hooks registered.
   local cs="$HOME/.claude/settings.json"
   if [[ -r "$cs" ]]; then
-    if grep -q 'BEGIN cc-ssh hooks' "$cs"; then
-      local cnt
-      cnt="$(grep -c '"cc-ssh hook' "$cs" 2>/dev/null || echo 0)"
-      if (( cnt >= 16 )); then
-        _doc_pass "$cnt/16 cc-ssh hooks registered in $cs"
-      else
-        _doc_fail "$cnt/16 cc-ssh hooks registered in $cs (run: cc-ssh install --claude)"
-      fi
+    local cnt
+    cnt="$(cc_jq -r '[.. | .command? | strings | select(test("/cc-ssh hook "))] | length' "$cs" 2>/dev/null || true)"
+    cnt="${cnt:-0}"
+    if (( cnt >= 16 )); then
+      _doc_pass "$cnt/16 cc-ssh hooks registered in $cs"
+    elif (( cnt > 0 )); then
+      _doc_fail "$cnt/16 cc-ssh hooks registered in $cs (run: cc-ssh install --claude)"
     else
       _doc_info "Claude hooks not installed (run: cc-ssh install --claude)"
     fi
@@ -79,7 +78,8 @@ cc_doctor() {
   if [[ -r "$cf" ]]; then
     if grep -q 'BEGIN cc-ssh hooks' "$cf"; then
       local cnt
-      cnt="$(grep -c '"cc-ssh codex-hook' "$cf" 2>/dev/null || echo 0)"
+      cnt="$(grep -c '/cc-ssh codex-hook ' "$cf" 2>/dev/null || true)"
+      cnt="${cnt:-0}"
       if (( cnt >= 6 )); then
         _doc_pass "$cnt/6 cc-ssh hooks registered in $cf"
       else
@@ -107,13 +107,15 @@ cc_doctor() {
     local rule_cnt
     if cc_have taplo; then
       if taplo validate "$pol" >/dev/null 2>&1; then
-        rule_cnt="$(grep -c '^\[\[' "$pol" 2>/dev/null || echo 0)"
+        rule_cnt="$(grep -c '^\[\[' "$pol" 2>/dev/null || true)"
+        rule_cnt="${rule_cnt:-0}"
         _doc_pass "$pol exists ($rule_cnt rules)"
       else
         _doc_fail "$pol has TOML syntax errors (taplo validate failed)"
       fi
     else
-      rule_cnt="$(grep -c '^\[\[' "$pol" 2>/dev/null || echo 0)"
+      rule_cnt="$(grep -c '^\[\[' "$pol" 2>/dev/null || true)"
+      rule_cnt="${rule_cnt:-0}"
       _doc_pass "$pol exists ($rule_cnt rules; taplo not installed for validation)"
     fi
   else

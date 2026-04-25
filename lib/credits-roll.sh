@@ -11,27 +11,24 @@ fi
 
 ROLL_PERIOD_MS="${ROLL_PERIOD_MS:-1000}"
 
-# Phase emoji + color tables.
-phase_emoji() {
-  case "$1" in
-    ready) echo "🟢" ;;
-    thinking) echo "🧠" ;;
-    working) echo "🛠" ;;
-    waiting) echo "✋" ;;
-    compacting) echo "🌀" ;;
-    done) echo "✅" ;;
-    error) echo "🔴" ;;
-    *) echo "🟢" ;;
-  esac
-}
-
+# phase_color <phase> [<tick_ms>] — sidebar-toned palette anchored on #323343.
+# Active phases (working/thinking/compacting) cycle through 8 closely-spaced
+# shades to give a subtle "breathing" effect during long operations; static
+# states stay on a single hue so the eye can rest. tick_ms drives the cycle
+# index — pass cc_now_ms() (or any monotonic ms) to advance once per period.
 phase_color() {
-  case "$1" in
-    working|compacting) echo "#FF9500" ;;
-    thinking) echo "#5856D6" ;;
-    waiting|error) echo "#FF3B30" ;;
-    done) echo "#34C759" ;;
-    *) echo "" ;;
+  local phase="$1" tick_ms="${2:-0}"
+  case "$phase" in
+    working|thinking|compacting)
+      local cycle=( "#2d2e3d" "#323343" "#37384a" "#3d3e51" "#34344a" "#272840" "#1c1d37" "#0e0f2b" )
+      local period_ms="${PHASE_CYCLE_PERIOD_MS:-${ROLL_PERIOD_MS:-1000}}"
+      local idx=$(( (tick_ms / period_ms) % ${#cycle[@]} ))
+      (( idx < 0 )) && idx=0
+      echo "${cycle[$idx]}"
+      ;;
+    waiting|error)  echo "#3C3243" ;;  # warning / attention — sidebar-toned red
+    done)           echo "#323F43" ;;  # completed — sidebar-toned teal
+    ready|*)        echo "#323343" ;;  # sidebar base
   esac
 }
 
@@ -87,12 +84,14 @@ format_credits_roll() {
   lanes_count=$(printf '%s' "$state" | cc_jq -r '.cycling_lanes | length // 0')
 
   # Title.
-  local title="📂 $project"
+  local title="$project"
   if [[ "$session_count" =~ ^[0-9]+$ ]] && (( session_count >= 2 )); then
-    title="$title · ${session_count}🪟"
+    title="$title · ${session_count} sessions"
   fi
   if [[ "$subagent_count" =~ ^[0-9]+$ ]] && (( subagent_count >= 1 )); then
-    title="$title · ${subagent_count}🤖"
+    local agent_label="agents"
+    (( subagent_count == 1 )) && agent_label="agent"
+    title="$title · ${subagent_count} ${agent_label}"
   fi
   title="$title · ${ops} ops"
   if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" && "$branch" != "null" ]]; then
@@ -104,7 +103,7 @@ format_credits_roll() {
   # desc-1.
   local desc1=""
   if [[ -n "$current_tool" && "$current_tool" != "null" ]]; then
-    desc1="$(cc_truncate_str 40 "▶ $current_tool")"
+    desc1="$(cc_truncate_str 40 "$current_tool")"
   fi
 
   # desc-2/3/4 — cycling rules.
@@ -128,18 +127,16 @@ format_credits_roll() {
   desc4=$(cc_truncate_str 40 "$desc4")
 
   # desc-5 footer.
-  local emoji
-  emoji=$(phase_emoji "$phase")
   local color
-  color=$(phase_color "$phase")
+  color=$(phase_color "$phase" "$tick_ms")
   local elapsed_str
   elapsed_str=$(format_elapsed "${elapsed:-0}")
-  local desc5="⏱ ${elapsed_str} · ${emoji} ${phase}"
+  local desc5="${elapsed_str} · ${phase}"
   if [[ -n "$auto_continue" && "$auto_continue" != "null" ]]; then
     desc5="${desc5} · (auto-continue ${auto_continue})"
   fi
   if [[ -n "$bypass" && "$bypass" != "null" ]]; then
-    desc5="${desc5} · ⚠ bypass: ${bypass}"
+    desc5="${desc5} · bypass: ${bypass}"
   fi
   desc5=$(cc_truncate_str 60 "$desc5")
 

@@ -420,10 +420,10 @@ policy_permission_alert() {
       if _rule_matches "$rule" "$event"; then
         dest=$(printf '%s' "$rule" | cc_jq -r '.target_workspace_id // ""')
         local title body project tool
-        title=$(printf '%s' "$rule" | cc_jq -r '.title // "🔐 Codex permission needed"')
+        title=$(printf '%s' "$rule" | cc_jq -r '.title // "Codex permission needed"')
         project=$(state_project 2>/dev/null || echo "workspace")
         tool=$(printf '%s' "$event" | cc_jq -r '.tool_name // ""')
-        body="📂 ${project} · ${tool}"
+        body="${project} · ${tool}"
         cc_notify_cross_workspace "$title" "$body" \
           --rule "permission_alert[$i]" \
           ${dest:+--workspace "$dest"}

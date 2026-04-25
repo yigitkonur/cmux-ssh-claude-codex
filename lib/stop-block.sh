@@ -263,13 +263,13 @@ stop_block_alert() {
   project="$(state_project "$wid" 2>/dev/null || echo workspace)"
   local count
   count="$(_counter_get "$wid" "$sid")"
-  local body="📂 ${project} · ${count} attempts"
+  local body="${project} · ${count} attempts"
   case "$kind" in
     cap) body="${body} · cap reached" ;;
     dedup) body="${body} · dedup: ${reason}" ;;
     idle) body="${body} · idle gate triggered" ;;
   esac
-  cc_notify_cross_workspace "🔴 Codex stop-block exhausted" "$body" --rule "stop_block_$kind"
+  cc_notify_cross_workspace "Codex stop-block exhausted" "$body" --rule "stop_block_$kind"
 }
 
 # codex_admin_cli — sub-handler for `cc-ssh codex ...`.

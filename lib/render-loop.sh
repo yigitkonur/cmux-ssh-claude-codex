@@ -44,6 +44,7 @@ compute_session_state() {
   printf '%s' "$arr" | cc_jq --arg kind "$kind" --argjson now "$now_s" '
     . as $events
     | (([$events[] | select(.evt=="start") | .at] | map(select(. != null)) | last) // $now) as $started_at
+    | (([$events[] | .at // empty] | min) // $now) as $oldest_at
     | ($events[-1] // {}) as $last
     | ([$events[] | select(.evt=="stop")] | last // {}) as $last_stop
     | ([$events[] | select(.evt=="permission_request")] | last) as $last_perm
@@ -54,21 +55,49 @@ compute_session_state() {
     | ([$events[] | select(.evt=="post_tool")] | last) as $last_post
     | ([$events[] | select(.evt=="user_prompt_submit")] | last) as $last_prompt
     | (
+        # turn_marker_at: the latest timestamp of any event that signals "we
+        # are in a turn." Includes pre/post/permission so a JSONL truncation
+        # that drops user_prompt_submit still keeps the in-turn signal.
+        [
+          ($last_prompt.at // 0),
+          ($last_pre.at // 0),
+          ($last_post.at // 0),
+          ($last_perm.at // 0)
+        ] | max
+      ) as $turn_marker_at
+    | (
+        # In-turn iff a turn-marker exists and no subsequent user_turn_complete
+        # stop has closed it. This is the canonical "Claude is processing"
+        # signal — and the ONLY thing that gates whether we may show "ready."
+        $turn_marker_at > 0 and
+        ((($last_stop.stop_reason // "") != "user_turn_complete")
+         or ($turn_marker_at > ($last_stop.at // 0)))
+      ) as $in_turn
+    | (
+        # Each branch returns {phase, at} where `at` is the timestamp of the
+        # event that put us in that phase. elapsed_s = $now - $p.at.
+        # waiting also requires permission_request newer than the last pre_tool
+        # — once a tool actually starts it implicitly resolves the request.
+        # thinking is the in-turn fallback: any moment Claude is mid-turn but
+        # no tool is currently running (e.g., between post_tool and next
+        # pre_tool, while Claude is reading the result).
         if ($last_stop.stop_reason // "") == "error" and ($last_stop.at // 0) >= ($last.at // 0)
-          then "error"
-        elif ($last_perm != null) and (($last_perm.at // 0) > ($last_perm_res.at // -1))
-          then "waiting"
+          then {phase:"error",      at:($last_stop.at // $now)}
+        elif ($last_perm != null)
+             and (($last_perm.at // 0) > ($last_perm_res.at // -1))
+             and (($last_perm.at // 0) > ($last_pre.at // -1))
+          then {phase:"waiting",    at:($last_perm.at // $now)}
         elif ($last_compact_pre != null) and (($last_compact_pre.at // 0) > ($last_compact_post.at // -1))
-          then "compacting"
+          then {phase:"compacting", at:($last_compact_pre.at // $now)}
         elif ($last_pre != null) and (($last_pre.at // 0) > ($last_post.at // -1))
-          then "working"
-        elif ($last_prompt != null) and (($last_prompt.at // 0) > ($last_pre.at // -1)) and (($last_prompt.at // 0) > ($last_post.at // -1))
-          then "thinking"
+          then {phase:"working",    at:($last_pre.at // $now)}
+        elif $in_turn
+          then {phase:"thinking",   at:([($last_prompt.at // 0), ($last_post.at // 0), $oldest_at] | max)}
         elif ($last_stop.stop_reason // "") == "user_turn_complete"
-          then "done"
-        else "ready"
+          then {phase:"done",       at:($last_stop.at // $now)}
+        else {phase:"ready",        at:$oldest_at}
         end
-      ) as $phase
+      ) as $p
     | ([$events[] | select(.evt=="post_tool")] | length) as $ops
     | (
         if ($last_pre != null) and (($last_pre.at // 0) > ($last_post.at // -1))
@@ -111,10 +140,11 @@ compute_session_state() {
       ) as $recent
     | {
         kind: $kind,
-        phase: $phase,
+        phase: $p.phase,
+        phase_started_at: $p.at,
         ops: $ops,
         current_tool: $current_tool,
-        elapsed_s: ($now - $started_at),
+        elapsed_s: ($now - $p.at),
         subagents: $subs_arr,
         recent_tools: $recent,
         last_event_at: ($last.at // $now)
@@ -224,7 +254,14 @@ compute_union_state() {
         else "ready" end
       ) as $phase
     | ($sessions | map(.ops // 0) | add // 0) as $ops
-    | ($sessions | map(.elapsed_s // 0) | max // 0) as $elapsed
+    | (
+        # elapsed_s is the time since the chosen union phase began, taken from
+        # whichever session(s) match that phase. Ensures the tile timer reflects
+        # the *current* phase, not an unrelated session sitting in "done".
+        $sessions
+        | map(select((.phase // "ready") == $phase) | .elapsed_s // 0)
+        | max // 0
+      ) as $elapsed
     | ($sessions | map(.current_tool) | map(select(. != null and . != "")) | first // null) as $cur
     | ($sessions | map(.subagents // []) | add // []) as $subs
     | ($subs | length) as $sub_count
@@ -264,6 +301,7 @@ compute_union_state() {
         subagent_count: $sub_count,
         ops: $ops,
         phase: $phase,
+        phase_started_at: ($now - $elapsed),
         elapsed_s: $elapsed,
         current_tool: $cur,
         git_branch: $git_branch,

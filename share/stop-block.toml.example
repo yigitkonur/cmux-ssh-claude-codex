@@ -1,0 +1,40 @@
+# cc-ssh stop-block.toml — Codex auto-continue rules.
+#
+# Place at:
+#   ~/.cc-ssh/stop-block.toml          (per-user)
+#   <repo>/.cc-ssh/stop-block.toml     (per-repo overlay)
+#
+# Off by default. Enable with:
+#   cc-ssh codex enable-stop-block
+# Disable with:
+#   cc-ssh codex disable-stop-block
+#
+# Hard caps protect against runaway loops:
+#   - max_iterations = 5            (env: MAX_AUTO_CONTINUE_ITERATIONS)
+#   - reason dedup: same reason 3× -> stop
+#   - idle gate: 1800s since user prompt -> stop (env: MAX_AUTO_CONTINUE_AGE)
+#
+# Each rule has:
+#   matcher  POSIX-ERE regex on the most recent failed tool's `label` field
+#   prompt   the auto-continue text Codex receives as `decision: "block"` reason
+#   tool     (optional) only match this tool — Bash, apply_patch, etc.
+
+[[rule]]
+matcher = "(npm|pnpm|yarn|bun)[[:space:]]+test"
+prompt = "Tests still failing — fix the failing assertions before stopping."
+tool = "Bash"
+
+[[rule]]
+matcher = "(tsc|tsx|tsserver|type-check)"
+prompt = "Type-check failing — fix the type errors before stopping."
+tool = "Bash"
+
+[[rule]]
+matcher = "(eslint|prettier|biome|ruff|gofmt|cargo[[:space:]]+clippy)"
+prompt = "Lint/format failing — fix the reported issues before stopping."
+tool = "Bash"
+
+[[rule]]
+matcher = "// CONTINUE: (.+)"
+prompt = "Continuing per marker comment."
+tool = "apply_patch"

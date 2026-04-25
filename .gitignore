@@ -1,0 +1,4 @@
+tests/.tmp/
+tests/**/*.tmp
+.DS_Store
+*.bak

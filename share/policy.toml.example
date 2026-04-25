@@ -1,0 +1,79 @@
+# cc-ssh policy.toml — Codex deny / allow / permission rules.
+#
+# Place this file at:
+#   ~/.cc-ssh/policy.toml          (per-user)
+#   <repo>/.cc-ssh/policy.toml     (per-repo overlay; arrays concatenate,
+#                                   singletons override)
+#
+# Evaluation order on PreToolUse:
+#   1. Bypass active?     → passthrough
+#   2. Any deny matches?  → emit {permissionDecision:"deny", reason}
+#   3. Any allow matches? → emit {permissionDecision:"allow"}
+#   4. Otherwise          → passthrough (Codex prompts the user)
+#
+# Match clauses (combined with AND):
+#   match.tool          string ("Bash"), wildcard ("*"), or list
+#   match.command_regex regex on Bash commands
+#   match.path_regex    regex on apply_patch / Edit / Write paths
+#   match.input_field.<key>_regex regex on arbitrary tool_input fields
+#   match.cwd_glob      glob on the session's cwd
+#   match.session_kind  "claude" or "codex"
+#
+# Test a rule without firing it:
+#   cc-ssh policy test '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+
+# Regex flavor: POSIX ERE (same as bash `[[ ... =~ ... ]]`). Use
+# `[[:space:]]` for whitespace, not `\s`.
+
+# ---- Hard denies ---------------------------------------------------------
+
+[[deny]]
+match.tool = "Bash"
+match.command_regex = "^[[:space:]]*rm[[:space:]]+-rf[[:space:]]+/"
+reason = "rm -rf / is never the right answer"
+
+[[deny]]
+match.tool = "Bash"
+match.command_regex = "git[[:space:]]+push[[:space:]]+--force.*(main|master)"
+reason = "force-push to main is denied; use --force-with-lease on a feature branch"
+
+[[deny]]
+match.tool = "Bash"
+match.command_regex = ":\\(\\)[[:space:]]*\\{.*:.*\\}"
+reason = "fork bomb pattern detected"
+
+# ---- Common allows -------------------------------------------------------
+
+[[allow]]
+match.tool = "Bash"
+match.command_regex = "^[[:space:]]*(ls|pwd|cat|head|tail|wc|grep|find|tree|file|stat|echo)( |$)"
+
+[[allow]]
+match.tool = "Bash"
+match.command_regex = "^[[:space:]]*git[[:space:]]+(status|log|diff|show|branch|fetch|remote)( |$)"
+
+[[allow]]
+match.tool = ["Read", "Grep", "Glob"]
+
+# ---- Permission rules (PermissionRequest + auto-deny) -------------------
+
+[[permission]]
+type = "cross_workspace_alert"
+match.tool = "*"
+title = "🔐 Codex permission needed"
+# Optional explicit destination; otherwise notify_dest from config.toml is used.
+# target_workspace_id = "00000000-0000-0000-0000-000000000000"
+
+# Auto-deny PreToolUse calls when the user has been idle longer than
+# .idle_seconds. The presence file is bumped on every UserPromptSubmit, so
+# "idle" means "no prompt in N seconds". This guards against unattended
+# Codex sessions taking dangerous actions.
+#
+# Disabled by default (commented out). Uncomment and tune .idle_seconds for
+# your environment. Explicit [[allow]] rules above always win.
+#
+# [[permission]]
+# type = "auto_deny_when_idle"
+# match.tool = "Bash"
+# idle_seconds = 600   # 10 min
+# reason = "auto-denied: Codex requested a tool while user was idle"

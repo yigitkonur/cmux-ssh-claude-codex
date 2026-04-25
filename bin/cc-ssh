@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# cc-ssh — bridge Claude Code and Codex CLI hook events into cmux workspace
+# tiles. Single binary; subcommands route to lib modules.
+#
+# See `cc-ssh --help` for the full subcommand list, or
+# https://github.com/yigitkonur/cc-ssh for documentation.
+
+set -u
+
+# Resolve our own location, following symlinks, so libs work whether we're run
+# from the source tree (~/dev/cc-ssh/bin/cc-ssh) or installed
+# (~/.cc-ssh/bin/cc-ssh) or symlinked into /usr/local/bin.
+_resolve_self() {
+  local src="$1" dir
+  while [[ -L "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+CC_SSH_BIN_DIR="$(_resolve_self "${BASH_SOURCE[0]}")"
+CC_SSH_ROOT="$(dirname "$CC_SSH_BIN_DIR")"
+CC_SSH_LIB_DIR="${CC_SSH_LIB_DIR:-$CC_SSH_ROOT/lib}"
+CC_SSH_SHARE_DIR="${CC_SSH_SHARE_DIR:-$CC_SSH_ROOT/share}"
+CC_SSH_HOME="${CC_SSH_HOME:-$HOME/.cc-ssh}"
+
+export CC_SSH_BIN_DIR CC_SSH_ROOT CC_SSH_LIB_DIR CC_SSH_SHARE_DIR CC_SSH_HOME
+
+# Make `cmux` reachable when hooks run from non-interactive shells.
+if [[ -d "$HOME/.cmux/bin" && ":$PATH:" != *":$HOME/.cmux/bin:"* ]]; then
+  PATH="$HOME/.cmux/bin:$PATH"
+  export PATH
+fi
+
+# CC_SSH_DEBUG=1 enables tracing into ~/.cc-ssh/log/debug.log.
+if [[ "${CC_SSH_DEBUG:-0}" -eq 1 ]]; then
+  mkdir -p "$CC_SSH_HOME/log"
+  exec 4>>"$CC_SSH_HOME/log/debug.log"
+  BASH_XTRACEFD=4
+  PS4='+ [$(date +%H:%M:%S.%N | cut -c1-12)] ${BASH_SOURCE##*/}:${LINENO}: '
+  set -x
+fi
+
+# Source a lib file (no-op if missing — dispatcher skeleton must work even
+# before the lib is implemented).
+_load_lib() {
+  local f="$CC_SSH_LIB_DIR/$1"
+  if [[ -r "$f" ]]; then
+    # shellcheck disable=SC1090
+    . "$f"
+    return 0
+  fi
+  return 1
+}
+
+# Always-on shared utilities (small, no external deps).
+_load_lib util.sh || true
+
+usage() {
+  cat <<'EOF'
+cc-ssh — Claude Code + Codex CLI hook bridge for cmux SSH workspaces.
+
+Usage:
+  cc-ssh hook <event>                Claude Code hook entry (reads stdin JSON)
+  cc-ssh codex-hook <event>          Codex CLI hook entry (reads stdin JSON)
+  cc-ssh render-loop <wid>           Spawn the per-workspace renderer
+  cc-ssh notify <title> [body]       Send a cross-workspace notification
+  cc-ssh log [--follow]              Tail ~/.cc-ssh/log/current.log
+  cc-ssh doctor                      Run health checks
+  cc-ssh policy {test,bypass}        Policy engine subcommands
+  cc-ssh codex {enable,disable}-stop-block
+  cc-ssh install   --claude|--codex  [--repo] [--yes] [--dry-run]
+  cc-ssh uninstall --claude|--codex  [--repo] [--remove-feature-flag]
+  cc-ssh --help                      Show this message
+  cc-ssh --version                   Print version
+
+Environment:
+  CMUX_WORKSPACE_ID   required for hook subcommands
+  CC_SSH_HOME         override state/config root (default ~/.cc-ssh)
+  CC_SSH_DEBUG=1      trace into ~/.cc-ssh/log/debug.log
+EOF
+}
+
+CC_SSH_VERSION="0.1.0"
+
+# Per-subcommand help. Routed through `cc-ssh <cmd> --help`.
+subcommand_help() {
+  case "$1" in
+    hook)
+      cat <<'EOF'
+cc-ssh hook <event>
+
+  Claude Code hook entry point. Reads JSON on stdin (the standard Claude
+  hook payload), dispatches to the matching event handler, appends jsonl
+  state, and (for the leader) bootstraps the renderer.
+
+  Events: SessionStart UserPromptSubmit PreToolUse PostToolUse
+          PostToolUseFailure PermissionRequest Stop StopFailure
+          SubagentStart SubagentStop Notification SessionEnd
+          TaskCompleted PreCompact PostCompact WorktreeCreate
+
+  Required env: CMUX_WORKSPACE_ID. Exits 0 silently if unset.
+EOF
+      ;;
+    codex-hook)
+      cat <<'EOF'
+cc-ssh codex-hook <event>
+
+  Codex CLI hook entry point. Reads JSON on stdin, applies the policy
+  engine on PreToolUse, runs the stop-block engine on Stop (when ack'd),
+  and emits Codex-shaped decision JSON to stdout when applicable.
+
+  Events: SessionStart UserPromptSubmit PreToolUse PermissionRequest
+          PostToolUse Stop
+
+  Codex feature flag `[features] codex_hooks = true` must be enabled in
+  ~/.codex/config.toml. `cc-ssh install --codex` enforces this.
+EOF
+      ;;
+    render-loop)
+      cat <<'EOF'
+cc-ssh render-loop [<workspace-id>]
+
+  Spawn the per-workspace renderer. 1 Hz tick, leader-elected via
+  mkdir(.leader) with TTL = LEADER_TTL (default 60s). Idles out after
+  IDLE_TTL (default 300s) of no alive sessions.
+
+  Defaults to $CMUX_WORKSPACE_ID. Hooks call this implicitly when the
+  current process wins the leader lock; manual invocation is rarely
+  needed.
+EOF
+      ;;
+    notify)
+      cat <<'EOF'
+cc-ssh notify <title> [body]
+
+  Wraps `cmux rpc notification.create` with the configured `notify_dest`
+  workspace target. Fires a cross-workspace alert; suppressed silently
+  when no notify_dest is configured.
+EOF
+      ;;
+    log)
+      cat <<'EOF'
+cc-ssh log [--follow|-f]
+
+  Tail ~/.cc-ssh/log/current.log. Default: last 200 lines, then exit.
+  With --follow: stream until interrupted.
+
+  Debug log (when CC_SSH_DEBUG=1): ~/.cc-ssh/log/debug.log
+EOF
+      ;;
+    doctor)
+      cat <<'EOF'
+cc-ssh doctor
+
+  Run health checks: binary on PATH, state dir writable, jq present,
+  Claude/Codex hooks registered, [features] codex_hooks = true, policy
+  syntax, stop-block status, notify_dest validity, renderer alive in
+  $CMUX_WORKSPACE_ID.
+
+  Exits non-zero if any check fails. ✓ pass · ⚠ warn · ✗ fail · i info.
+EOF
+      ;;
+    policy)
+      cat <<'EOF'
+cc-ssh policy <subcmd>
+
+Subcommands:
+  test <event-json>          Dry-run the policy engine against a JSON event
+  bypass --duration <dur>    Disable deny rules for <dur> (e.g. 5m, 1h)
+  bypass clear               Cancel an active bypass
+
+  Policy file: ~/.cc-ssh/policy.toml (or <repo>/.cc-ssh/policy.toml).
+  See share/policy.toml.example for syntax.
+EOF
+      ;;
+    codex)
+      cat <<'EOF'
+cc-ssh codex <subcmd>
+
+Subcommands:
+  enable-stop-block      Write the ack file enabling stop-block auto-continue
+  disable-stop-block     Remove the ack file
+
+  Stop-block rules: ~/.cc-ssh/stop-block.toml.
+  See share/stop-block.toml.example for syntax.
+EOF
+      ;;
+    install)
+      cat <<'EOF'
+cc-ssh install --claude|--codex [--repo] [--yes] [--dry-run]
+
+  Idempotent installer. Writes a marker-bracketed hook block into the
+  matching settings file:
+    --claude   ~/.claude/settings.json    (or <repo>/.claude/settings.local.json)
+    --codex    ~/.codex/config.toml       (or <repo>/.codex/config.toml)
+
+Flags:
+  --repo         Install to the per-repo override file (cwd-anchored)
+  --yes          Skip the chezmoi-managed-file prompt
+  --dry-run      Print the planned diff and exit without writing
+
+  Pre-flight: refuses to modify a file with invalid JSON/TOML syntax.
+  Coexistence: detects cmux-claude-pro / cmux-claude-code blocks and
+  preserves them with a notice.
+
+  --codex additionally enforces [features] codex_hooks = true and
+  requires `codex` on PATH.
+EOF
+      ;;
+    uninstall)
+      cat <<'EOF'
+cc-ssh uninstall --claude|--codex [--repo] [--remove-feature-flag]
+
+  Removes only the marker-bracketed cc-ssh block. User-authored hooks
+  outside the markers are preserved verbatim.
+
+Flags:
+  --repo                   Operate on the per-repo override file
+  --remove-feature-flag    (--codex only) Also strip codex_hooks = true
+EOF
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Intercept `--help`/`-h` after a known subcommand. Keep this AFTER usage()
+# so the top-level `--help` still routes through the case below.
+_maybe_help() {
+  local sub="$1"; shift
+  for a in "$@"; do
+    case "$a" in
+      --help|-h) subcommand_help "$sub"; exit 0 ;;
+    esac
+  done
+}
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  ""|--help|-h|help)
+    usage
+    ;;
+  --version|version)
+    echo "cc-ssh $CC_SSH_VERSION"
+    ;;
+  hook)
+    _maybe_help hook "$@"
+    _load_lib state.sh || true
+    _load_lib cmux-pill.sh || true
+    _load_lib cmux-notify.sh || true
+    _load_lib hook-claude.sh || { echo "cc-ssh: hook handler not installed" >&2; exit 0; }
+    handle_claude_hook "${1:-}"
+    ;;
+  codex-hook)
+    _maybe_help codex-hook "$@"
+    _load_lib state.sh || true
+    _load_lib cmux-pill.sh || true
+    _load_lib cmux-notify.sh || true
+    _load_lib policy.sh || true
+    _load_lib stop-block.sh || true
+    _load_lib hook-codex.sh || { echo "cc-ssh: codex-hook handler not installed" >&2; exit 0; }
+    handle_codex_hook "${1:-}"
+    ;;
+  render-loop)
+    _maybe_help render-loop "$@"
+    _load_lib state.sh || true
+    _load_lib cmux-pill.sh || true
+    _load_lib credits-roll.sh || true
+    _load_lib render-loop.sh || { echo "cc-ssh: render-loop not installed" >&2; exit 1; }
+    render_loop "${1:-${CMUX_WORKSPACE_ID:-}}"
+    ;;
+  notify)
+    _maybe_help notify "$@"
+    _load_lib cmux-pill.sh || true
+    _load_lib cmux-notify.sh || { echo "cc-ssh: notify lib not installed" >&2; exit 1; }
+    cc_notify_cross_workspace "${1:-}" "${2:-}"
+    ;;
+  log)
+    _maybe_help log "$@"
+    _load_lib log.sh || {
+      mkdir -p "$CC_SSH_HOME/log"
+      f="$CC_SSH_HOME/log/current.log"
+      [[ ! -e "$f" ]] && : > "$f"
+      if [[ "${1:-}" == "--follow" || "${1:-}" == "-f" ]]; then
+        exec tail -f "$f"
+      else
+        exec tail -n 200 "$f"
+      fi
+    }
+    ;;
+  doctor)
+    _maybe_help doctor "$@"
+    _load_lib util.sh || true
+    _load_lib doctor.sh || { echo "cc-ssh: doctor not installed" >&2; exit 1; }
+    cc_doctor "$@"
+    ;;
+  policy)
+    _maybe_help policy "$@"
+    _load_lib state.sh || true
+    _load_lib policy.sh || { echo "cc-ssh: policy lib not installed" >&2; exit 1; }
+    policy_cli "$@"
+    ;;
+  codex)
+    _maybe_help codex "$@"
+    _load_lib state.sh || true
+    _load_lib stop-block.sh || { echo "cc-ssh: stop-block lib not installed" >&2; exit 1; }
+    codex_admin_cli "$@"
+    ;;
+  install)
+    _maybe_help install "$@"
+    _load_lib util.sh || true
+    target=""
+    args=()
+    for a in "$@"; do
+      case "$a" in
+        --claude) target="claude" ;;
+        --codex)  target="codex" ;;
+        *) args+=("$a") ;;
+      esac
+    done
+    if [[ "$target" == "claude" ]]; then
+      _load_lib install-claude.sh || { echo "cc-ssh: install-claude lib not installed" >&2; exit 1; }
+      install_claude "${args[@]+"${args[@]}"}"
+    elif [[ "$target" == "codex" ]]; then
+      _load_lib install-codex.sh || { echo "cc-ssh: install-codex lib not installed" >&2; exit 1; }
+      install_codex "${args[@]+"${args[@]}"}"
+    else
+      echo "cc-ssh install: specify --claude or --codex" >&2
+      exit 2
+    fi
+    ;;
+  uninstall)
+    _maybe_help uninstall "$@"
+    _load_lib util.sh || true
+    target=""
+    args=()
+    for a in "$@"; do
+      case "$a" in
+        --claude) target="claude" ;;
+        --codex)  target="codex" ;;
+        *) args+=("$a") ;;
+      esac
+    done
+    if [[ "$target" == "claude" ]]; then
+      _load_lib install-claude.sh || { echo "cc-ssh: install-claude lib not installed" >&2; exit 1; }
+      uninstall_claude "${args[@]+"${args[@]}"}"
+    elif [[ "$target" == "codex" ]]; then
+      _load_lib install-codex.sh || { echo "cc-ssh: install-codex lib not installed" >&2; exit 1; }
+      uninstall_codex "${args[@]+"${args[@]}"}"
+    else
+      echo "cc-ssh uninstall: specify --claude or --codex" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "cc-ssh: unknown subcommand: $cmd" >&2
+    echo "Run 'cc-ssh --help' for usage." >&2
+    exit 2
+    ;;
+esac
